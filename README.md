@@ -7,6 +7,7 @@ A Python/FastAPI backend that analyzes uploaded videos using a Vision Language M
 - **Real Video Analysis**: Uses Qwen3-VL-8B-Instruct VLM for actual video understanding
 - **Automatic Frame Extraction**: Extracts frames at 1fps with intelligent naming convention
 - **Deepfake Detection**: Analyzes video for AI-generated content indicators
+- **Entity Detection**: Uses YOLOv8n to detect and extract persons/vehicles from best frame
 - **Structured JSON Output**: Returns consistent, parseable JSON responses
 - **Incident Classification**: Detects Security, Traffic, Fire, Fighting, and Unlawful Gathering incidents
 - **Severity Assessment**: Rates incidents on a 0-3 scale
@@ -21,7 +22,7 @@ Frontend → /upload → Save video → Extract frames → Return media_uuid
                           video.mp4
                           frames/{video_name}_01.jpg, _02.jpg, etc.
                             ↓
-Frontend → /predict/{media_uuid} → Load frames → Send to VLM → Return JSON
+Frontend → /predict/{media_uuid} → Load frames → Detect entities (YOLO) → Send to VLM → Return JSON
 ```
 
 ## Installation
@@ -123,6 +124,7 @@ curl -X POST http://localhost:4000/upload/ \
 Videos are stored in `videos/{media_uuid}/`:
 - Original video: `videos/{media_uuid}/video.mp4`
 - Extracted frames: `videos/{media_uuid}/frames/{video_name}_{seconds}.jpg`
+- Detected entities: `videos/{media_uuid}/entities/entity_0.jpg, entity_1.jpg, etc.`
 
 **Frame Naming Convention:**
 - Videos ≤99 seconds: `{video_name}_01.jpg`, `{video_name}_02.jpg`, etc.
@@ -136,7 +138,7 @@ Example:
 
 **POST** `/predict/{media_uuid}`
 
-Loads the extracted frames, sends them to the VLM for analysis, and returns structured incident data.
+Loads the extracted frames, detects entities using YOLO, sends them to the VLM for analysis, and returns structured incident data.
 
 #### Example Request (Frontend)
 
@@ -163,7 +165,10 @@ curl -X POST http://localhost:4000/predict/d6eb3208-1c82-2ed5-72b7-0567826d9d9d
   "incidentType": "Traffic",
   "authenticity": 0.95,
   "severity": 3,
-  "location": "Dover"
+  "location": "Dover",
+  "detections": {
+    "count": 5
+  }
 }
 ```
 
@@ -179,6 +184,7 @@ curl -X POST http://localhost:4000/predict/d6eb3208-1c82-2ed5-72b7-0567826d9d9d
 | `authenticity` | float | Authenticity score (0.0-1.0, where 1.0 is definitely real) |
 | `severity` | integer | Severity level (0-3, where 3 is most severe) |
 | `location` | string | Location of the incident (Singapore area or Unknown) |
+| `detections` | object | Entity detection results with `count` field (total persons/vehicles detected) |
 
 ## Incident Types
 
@@ -198,6 +204,102 @@ curl -X POST http://localhost:4000/predict/d6eb3208-1c82-2ed5-72b7-0567826d9d9d
 | **1** | Minor incident |
 | **2** | Moderate incident |
 | **3** | Severe / Critical incident |
+
+## Entity Detection Details
+
+### How It Works
+
+1. **Frame Analysis**: YOLOv8n analyzes all extracted frames to detect persons and vehicles
+2. **Best Frame Selection**: The frame with the most detections above confidence threshold is selected
+3. **Entity Extraction**: Crops of detected persons and vehicles are saved as separate images
+4. **Two-Pass Detection**: 
+   - First pass: High confidence (0.5) to count detections for frame selection
+   - Second pass: Lower confidence (0.25) to capture more entities from best frame
+
+### Detection Classes
+
+| Class ID | Class Name | Type |
+|----------|------------|------|
+| 0 | person | Person |
+| 1 | bicycle | Vehicle |
+| 2 | car | Vehicle |
+| 3 | motorcycle | Vehicle |
+| 5 | bus | Vehicle |
+| 7 | truck | Vehicle |
+
+### Entity Storage
+
+Detected entities are saved in `videos/{media_uuid}/entities/`:
+- `entity_0.jpg`, `entity_1.jpg`, `entity_2.jpg`, etc.
+- Each entity is a cropped image of a detected person or vehicle
+
+### Entity Endpoints
+
+#### 3. List Entities
+
+**GET** `/entities/{media_uuid}`
+
+Returns a list of all detected entity images for the video.
+
+#### Example Request (Frontend)
+
+```javascript
+const response = await fetch(`http://localhost:4000/entities/${mediaUuid}`);
+const data = await response.json();
+console.log(data.entities); // Array of entity objects
+```
+
+#### Example Request (cURL)
+
+```bash
+curl http://localhost:4000/entities/d6eb3208-1c82-2ed5-72b7-0567826d9d9d
+```
+
+#### Example Response
+
+```json
+{
+  "entities": [
+    {
+      "id": "entity_0",
+      "filename": "entity_0.jpg",
+      "url": "/api/entities/d6eb3208-1c82-2ed5-72b7-0567826d9d9d/entity_0.jpg"
+    },
+    {
+      "id": "entity_1",
+      "filename": "entity_1.jpg",
+      "url": "/api/entities/d6eb3208-1c82-2ed5-72b7-0567826d9d9d/entity_1.jpg"
+    }
+  ]
+}
+```
+
+#### 4. Get Entity Image
+
+**GET** `/entities/{media_uuid}/{filename}`
+
+Serves the entity image file.
+
+#### Example Request (Frontend)
+
+```javascript
+const imageUrl = `http://localhost:4000/entities/${mediaUuid}/entity_0.jpg`;
+document.getElementById('entity-img').src = imageUrl;
+```
+
+#### Example Request (cURL)
+
+```bash
+curl -O http://localhost:4000/entities/d6eb3208-1c82-2ed5-72b7-0567826d9d9d/entity_0.jpg
+```
+
+### YOLO Model
+
+The system uses **YOLOv8n** (nano version), which is:
+- Fast and efficient for real-time detection
+- Lightweight (≈6MB model size)
+- Auto-downloaded from Ultralytics on first use
+- Stored in cache for subsequent runs
 
 ## Console Output
 
@@ -222,6 +324,16 @@ Received predict request:
   Frames to analyze: 45
 ==================================================
 
+Loading YOLO model...
+  ✓ Model loaded
+
+Processing frames for entity detection...
+  Found 45 frames
+  Analyzing frames...
+  Best frame: fight1_15.jpg with 5 detections
+  Detected 5 total entities
+  Saved entities to videos/d6eb3208-1c82-2ed5-72b7-0567826d9d9d/entities/
+
 ==================================================
 VLM Analysis Result:
   summary: Car and motorcycle collision; rider pinned under taxi at signalized intersection.
@@ -229,6 +341,7 @@ VLM Analysis Result:
   severity: 3
   deepfake: false
   authenticity: 0.95
+  detections: 5 total entities
 ==================================================
 ```
 
@@ -244,7 +357,7 @@ VLM SERVICE UNAVAILABLE: Cannot connect to host 192.168.1.10:8000
 | Status Code | Description |
 |-------------|-------------|
 | 200 | Success |
-| 404 | Video or frames not found |
+| 404 | Video, frames, or entities not found |
 | 500 | Server error or invalid VLM response |
 | 503 | VLM service unavailable |
 
@@ -259,6 +372,10 @@ VLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 
 # Video storage directory
 VIDEOS_DIR = Path("videos")
+
+# YOLO model
+YOLO_MODEL = "yolov8n.pt"  # Auto-downloaded on first run
+YOLO_CONFIDENCE = 0.25  # Confidence threshold for detection
 ```
 
 ## Dependencies
@@ -269,6 +386,8 @@ uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 aiohttp>=3.9.0
 pydantic>=2.5.0
+ultralytics>=8.0.0
+opencv-python>=4.8.0
 ```
 
 ## System Requirements
@@ -277,6 +396,7 @@ pydantic>=2.5.0
 - ffmpeg (for video processing)
 - ffprobe (for video metadata)
 - Network access to VLM endpoint
+- yolov8n.pt model (auto-downloaded on first use)
 
 ## Troubleshooting
 
@@ -294,6 +414,14 @@ If frames are not extracted:
 2. Check video file format is supported
 3. Ensure sufficient disk space in `videos/` directory
 
+### Entity Detection Fails
+
+If entities are not detected:
+1. Check that yolov8n.pt model exists or can be downloaded
+2. Verify ultralytics is installed: `pip show ultralytics`
+3. Ensure frames were extracted successfully
+4. Check that YOLO confidence threshold is appropriate
+
 ### Video Not Found
 
 If `/predict/{media_uuid}` returns 404:
@@ -308,6 +436,8 @@ If `/predict/{media_uuid}` returns 404:
 - Frame extraction at 1fps may miss rapid events
 - VLM accuracy depends on video quality and clarity
 - Location detection depends on visible landmarks
+- YOLO detection accuracy depends on object size and clarity
+- Entity extraction only uses the best frame, not all frames
 
 ## Security Considerations
 

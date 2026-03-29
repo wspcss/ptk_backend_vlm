@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
@@ -11,6 +11,9 @@ import base64
 from pathlib import Path
 from typing import Optional
 import time
+import cv2
+from ultralytics import YOLO
+
 app = FastAPI()
 
 # Configuration
@@ -19,6 +22,7 @@ VLM_MODEL = None  # Will be fetched from /v1/models endpoint on startup
 LLM_ENDPOINT = "http://192.168.1.10:9000/v1/chat/completions"
 LLM_MODEL = None  # Will be fetched from /v1/models endpoint on startup
 VIDEOS_DIR = Path("videos")
+YOLO_MODEL = None  # YOLO model for person/vehicle detection
 
 
 async def get_vlm_model() -> Optional[str]:
@@ -73,9 +77,24 @@ async def get_llm_model() -> Optional[str]:
         return None
 
 
+def load_yolo_model():
+    """Load YOLO model for person/vehicle detection"""
+    global YOLO_MODEL
+    try:
+        print("Loading YOLO model...")
+        YOLO_MODEL = YOLO("yolov8n.pt")
+        print("  ✓ YOLO model loaded successfully")
+        return YOLO_MODEL
+    except Exception as e:
+        print(f"WARNING: Failed to load YOLO model: {e}")
+        print("  YOLO detection will not be available")
+        YOLO_MODEL = None
+        return None
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Fetch the VLM and LLM models on startup"""
+    """Fetch the VLM and LLM models on startup, and load YOLO model"""
     global VLM_MODEL, LLM_MODEL
     VLM_MODEL = await get_vlm_model()
     if not VLM_MODEL:
@@ -84,6 +103,9 @@ async def startup_event():
     LLM_MODEL = await get_llm_model()
     if not LLM_MODEL:
         print("WARNING: Failed to fetch LLM model. The application may not function correctly.")
+    
+    # Load YOLO model synchronously
+    load_yolo_model()
 
 
 # Add CORS middleware
@@ -96,10 +118,8 @@ app.add_middleware(
 )
 
 
-
-
 # Analysis prompt requesting only summary
-ANALYSIS_PROMPT = """You’re an AI Incident Analyst. Analyze the image frames as a continuous sequence of 1-second frames of a video. Your output must contain ONLY the following two sections and NO other text.
+ANALYSIS_PROMPT = """You're an AI Incident Analyst. Analyze the image frames as a continuous sequence of 1-second frames of a video. Your output must contain ONLY the following two sections and NO other text.
 Overview
 [3-5 sentence description of the incident, event, participants, and location.]
 
@@ -115,6 +135,8 @@ Rules for Analysis:
 4. SILENCE: NEVER output your thought process.
 
 """
+
+
 
 # Analysis prompt requesting only summary
 # ANALYSIS_PROMPT = """You’re an AI Incident Analyst. Analyze the image frames as a continuous sequence of 1-second frames of a video.  
@@ -210,6 +232,35 @@ Rules for Analysis:
 # 4. SILENCE: NEVER output your thought process. EVER.
 
 # Begin Summary IMMEDIATELY:
+# """
+
+
+# ANALYSIS_PROMPT = """
+# <SYSTEM_INSTRUCTION>
+# You are an automated Incident Timeline Generator. Your task is to convert image sequences into a summary.
+# </SYSTEM_INSTRUCTION>
+
+# <CRITICAL_RULES>
+# 1.  **OUTPUT ONLY:** Do not output any thinking, reasoning, or "Wait" statements. Only output the final Timeline.
+# 2.  **NO FRAME LISTING:** Do not list individual frames. Group them by action (e.g., 00:00 - 00:05).
+# 3.  **NO RE-EVALUATION:** Once you write a timestamp, do not go back and change it. If you are unsure, estimate and move on.
+# 4.  **STOP IMMEDIATELY:** End the response after the last timestamp entry. Do not add "I hope this helps" or similar.
+# </CRITICAL_RULES>
+
+# <FEW_SHOT_EXAMPLE>
+# Input: 5 frames of a car driving straight.
+# Output:
+# 00:00 - 00:04: Traffic - Vehicle driving straight on highway.
+# </FEW_SHOT_EXAMPLE>
+
+# <OUTPUT_FORMAT>
+# Chronological Timeline of Actions
+# MM:SS - MM:SS: [Category] - [Concise Description]
+# </OUTPUT_FORMAT>
+
+# <USER_INPUT>
+# [INSERT IMAGE FRAMES HERE]
+# </USER_INPUT>
 # """
 
 def get_video_duration(video_path: str) -> int:
@@ -378,41 +429,34 @@ async def send_to_vlm(frames: list[str], media_uuid: str) -> str:
             {
                 "role": "system",
                 "content": """
-                    CRITICAL OPERATING RULES:
-
-                    NO REASONING: Never output internal thoughts, "re-evaluations," or phrases like "Looking closely" or "Wait."
-                    TEMPORAL RIGIDITY: You are strictly forbidden from generating timestamps beyond the provided "Temporal Boundary."
-                    SCENE GROUPING: If a scene is static, group it (e.g., 00:00 - 00:10). Only detail state changes (collisions, fire, movement shifts).    
-                    CATEGORIES: Use only: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Unknown.
-                    You will receive a number of image frames each 1 second apart. Chronological timeline actions should not exceed timestamp of the last image frame. Eg if last frame is 45, timeline should not go beyond 00:46.
-
+                    You are an automated Incident Timeline Generator.
+                    OUTPUT ONLY the final timeline. Do not output reasoning, thoughts, or "Wait" statements.
+                    If you start listing frames or re-evaluating, STOP and output the timeline only.
+                    End after the last timestamp entry. No extra text.
                 """
+                # "content": """
+                #     CRITICAL OPERATING RULES:
+
+                #     NO REASONING: Never output internal thoughts, "re-evaluations," or phrases like "Looking closely" or "Wait."
+                #     TEMPORAL RIGIDITY: You are strictly forbidden from generating timestamps beyond the provided "Temporal Boundary."
+                #     SCENE GROUPING: If a scene is static, group it (e.g., 00:00 - 00:10). Only detail state changes (collisions, fire, movement shifts).    
+                #     CATEGORIES: Use only: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Unknown.
+                #     You will receive a number of image frames each 1 second apart. Chronological timeline actions should not exceed timestamp of the last image frame. Eg if last frame is 45, timeline should not go beyond 00:46.
+
+                # """
             },
             {
                 "role": "user",
                 "content": content
             }
         ],
-        # "extra_body": {
-        #     "chat_template_kwargs": {"enable_thinking": False}
-        # },
         "max_tokens": 8192,
-        "use_thinking": False,
-        "stop": ["<|endofthought|>", "<|im_start|>", "<|im_end|>"], # Added stop sequences
+        # "use_thinking": False,
+        "extra_body":{
+          "chat_template_kwargs":{"enable_thinking":False}  
+        },
         "temperature": 0.1,
-        "stop": [
-        "<|endofthought|>",
-        "<|im_start|>",
-        "<|im_end|>",
-        "Wait,",
-        "Actually,",
-        "Looking at",
-        "Let me",
-        "I need to",
-        "Let's",
-        "The frames",
-        "Refining",
-        "Draft"],
+        "stop": ["<|endofthought|>", "<|im_start|>", "<|im_end|>", "Wait,", "Actually,", "Looking at", "Let me", "I need to", "Let's", "The frames", "Refining", "Draft"],
         "repetition_penalty": 1.1
     }
     
@@ -614,6 +658,124 @@ Summary to analyze:
                 "authenticity": 0.0
             }
 
+
+def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
+    """
+    Detect persons and vehicles in frames using YOLO.
+    Uses two-pass approach: find best frame, then extract entities from it.
+    Saves cropped images to entities_dir.
+    Returns total number of entities detected.
+    """
+    if YOLO_MODEL is None:
+        print("YOLO model not available, skipping detection")
+        return 0
+    
+    # Vehicle classes: bicycle(1), car(2), motorcycle(3), bus(5), truck(7)
+    vehicle_classes = [1, 2, 3, 5, 7]
+    person_class = [0]
+    all_entity_classes = person_class + vehicle_classes
+    
+    print(f"\n{'='*50}")
+    print("Running YOLO detection...")
+    print(f"{'='*50}\n")
+    
+    # Create entities directory
+    os.makedirs(entities_dir, exist_ok=True)
+    
+    # Clear existing entity files
+    for f in os.listdir(entities_dir):
+        if f.endswith('.jpg'):
+            os.remove(os.path.join(entities_dir, f))
+    
+    frame_data = []
+    
+    # === PASS 1: Analyze all frames to find best frame ===
+    print("Pass 1: Analyzing frames to find best frame...")
+    for i, frame_path in enumerate(frames):
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            print(f"  [Frame {i+1}/{len(frames)}] Could not load {frame_path}")
+            continue
+        
+        # Detect all entities (persons + vehicles)
+        results = YOLO_MODEL(frame, conf=0.25, classes=all_entity_classes, verbose=False)
+        
+        total_detections = 0
+        conf_sum = 0.0
+        
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                total_detections += 1
+                conf_sum += float(box.conf[0])
+        
+        avg_confidence = conf_sum / total_detections if total_detections > 0 else 0.0
+        
+        frame_data.append({
+            'path': frame_path,
+            'frame': frame,
+            'total_detections': total_detections,
+            'avg_confidence': avg_confidence
+        })
+        
+        print(f"  [Frame {i+1}/{len(frames)}] {os.path.basename(frame_path)}: {total_detections} detections (conf: {avg_confidence:.3f})")
+    
+    if not frame_data:
+        print("No valid frames found for detection")
+        return 0
+    
+    # Calculate average detections across all frames
+    avg_total_detections = sum(f['total_detections'] for f in frame_data) / len(frame_data)
+    
+    # Filter frames above average
+    above_average_frames = [f for f in frame_data if f['total_detections'] >= avg_total_detections]
+    
+    # Select winning frame (highest confidence among above-average frames)
+    if above_average_frames:
+        winning_frame_data = max(above_average_frames, key=lambda x: x['avg_confidence'])
+    else:
+        # Fallback: pick frame with highest confidence overall
+        winning_frame_data = max(frame_data, key=lambda x: x['avg_confidence'])
+    
+    print(f"\nBest frame selected: {os.path.basename(winning_frame_data['path'])}")
+    print(f"  Detections: {winning_frame_data['total_detections']}")
+    print(f"  Avg confidence: {winning_frame_data['avg_confidence']:.3f}")
+    
+    # === PASS 2: Extract entities from winning frame ===
+    print(f"\nPass 2: Extracting entities from best frame...")
+    
+    frame = winning_frame_data['frame']
+    entity_count = 0
+    
+    # Detect and crop entities
+    results = YOLO_MODEL(frame, conf=0.25, classes=all_entity_classes, verbose=False)
+    
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            confidence = float(box.conf[0])
+            class_id = int(box.cls[0])
+            
+            # Crop entity
+            entity_crop = frame[y1:y2, x1:x2]
+            
+            # Save entity image
+            entity_filename = f"entity_{entity_count}.jpg"
+            entity_path = os.path.join(entities_dir, entity_filename)
+            cv2.imwrite(entity_path, entity_crop)
+            
+            entity_type = "person" if class_id == 0 else "vehicle"
+            print(f"  ✓ Entity {entity_count}: {entity_type} (confidence={confidence:.2f})")
+            
+            entity_count += 1
+    
+    print(f"\nTotal entities extracted: {entity_count}")
+    print(f"{'='*50}\n")
+    
+    return entity_count
+
+
 # Upload endpoint
 @app.post("/upload")
 async def upload_data(post_file: UploadFile = File(...)):
@@ -632,8 +794,10 @@ async def upload_data(post_file: UploadFile = File(...)):
         # Create directory for this video
         video_dir = VIDEOS_DIR / media_uuid
         frames_dir = video_dir / "frames"
+        entities_dir = video_dir / "entities"
         video_dir.mkdir(parents=True, exist_ok=True)
         frames_dir.mkdir(parents=True, exist_ok=True)
+        entities_dir.mkdir(parents=True, exist_ok=True)
         
         # Save video file
         save_start = time.time()
@@ -713,8 +877,10 @@ async def upload_url(url: str):
         # Create directory for this video
         video_dir = VIDEOS_DIR / media_uuid
         frames_dir = video_dir / "frames"
+        entities_dir = video_dir / "entities"
         video_dir.mkdir(parents=True, exist_ok=True)
         frames_dir.mkdir(parents=True, exist_ok=True)
+        entities_dir.mkdir(parents=True, exist_ok=True)
         
         # Video path
         video_path = video_dir / "video.mp4"
@@ -833,6 +999,12 @@ async def predict(media_uuid: str):
         classification = await send_to_llm_for_classification(summary)
         llm_time = time.time() - llm_start
         
+        # Run YOLO detection
+        detect_start = time.time()
+        entities_dir = video_dir / "entities"
+        entities_count = detect_and_extract_entities(frames, str(entities_dir))
+        detect_time = time.time() - detect_start
+        
         # Extract values from classification result
         incident_type = classification.get("incidentType", "Unknown")
         severity = classification.get("severity", 0)
@@ -861,6 +1033,7 @@ async def predict(media_uuid: str):
         print(f"  - Load frames: {load_time:.2f} seconds")
         print(f"  - VLM analysis: {vlm_time:.2f} seconds")
         print(f"  - LLM classification: {llm_time:.2f} seconds")
+        print(f"  - YOLO detection: {detect_time:.2f} seconds")
         print(f"{'='*50}\n")
         
         # Return structured response
@@ -874,7 +1047,10 @@ async def predict(media_uuid: str):
                 "authenticity": authenticity,
                 "severity": severity,
                 "location": location,
-                "shortsummary": shortsummary
+                "shortsummary": shortsummary,
+                "detections": {
+                    "count": entities_count
+                }
             }
         )
         
@@ -906,7 +1082,6 @@ async def get_video(media_uuid: str):
             )
         
         # Return video file with proper content type
-        from fastapi.responses import FileResponse
         return FileResponse(
             path=str(video_path),
             media_type="video/mp4",
@@ -1023,7 +1198,6 @@ async def get_thumbnail(media_uuid: str, frame_file: str):
             )
         
         # Return image file with proper content type
-        from fastapi.responses import FileResponse
         return FileResponse(
             path=str(frame_path),
             media_type="image/jpeg",
@@ -1044,6 +1218,119 @@ async def get_thumbnail(media_uuid: str, frame_file: str):
         )
 
 
+@app.get("/entities/{media_uuid}")
+async def get_entities_list(media_uuid: str):
+    """Get list of all detected entity images for a video"""
+    try:
+        # Check if video directory exists
+        video_dir = VIDEOS_DIR / media_uuid
+        if not video_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Video with media_uuid {media_uuid} not found"
+            )
+        
+        # Check if entities directory exists
+        entities_dir = video_dir / "entities"
+        if not entities_dir.exists():
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "media_uuid": media_uuid,
+                    "entities": []
+                }
+            )
+        
+        # Get all entity files sorted by number
+        entity_files = list(entities_dir.glob("*.jpg"))
+        
+        # Extract number from filename and sort
+        def extract_entity_number(filename: str) -> int:
+            """Extract entity number from filename like 'entity_0.jpg' -> 0"""
+            try:
+                base = os.path.splitext(filename)[0]
+                number_str = base.split('_')[-1]
+                return int(number_str)
+            except (ValueError, IndexError):
+                return 0
+        
+        sorted_entities = sorted(entity_files, key=lambda f: extract_entity_number(f.name))
+        
+        # Build entity list with URLs (same format as thumbnails)
+        entities = []
+        for entity_file in sorted_entities:
+            entity_id = extract_entity_number(entity_file.name)
+            entities.append({
+                "id": str(entity_id),
+                "filename": entity_file.name,
+                "url": f"/api/entities/{media_uuid}/{entity_file.name}"
+            })
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "media_uuid": media_uuid,
+                "total_entities": len(entities),
+                "entities": entities
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting entities list: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "Error getting entities list",
+                "error": str(e)
+            }
+        )
+
+
+@app.get("/entities/{media_uuid}/{entity_file}")
+async def get_entity(media_uuid: str, entity_file: str):
+    """Serve individual entity image file"""
+    try:
+        # Check if video directory exists
+        video_dir = VIDEOS_DIR / media_uuid
+        if not video_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Video with media_uuid {media_uuid} not found"
+            )
+        
+        # Build entity file path
+        entity_path = video_dir / "entities" / entity_file
+        
+        if not entity_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Entity {entity_file} not found for media_uuid {media_uuid}"
+            )
+        
+        # Return image file with proper content type
+        return FileResponse(
+            path=str(entity_path),
+            media_type="image/jpeg",
+            filename=entity_file
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error serving entity: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "Error serving entity",
+                "error": str(e)
+            }
+        )
+
+
 if __name__ == "__main__":
-      import uvicorn
-      uvicorn.run(app, host="0.0.0.0", port=4000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=4000)
