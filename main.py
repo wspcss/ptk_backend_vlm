@@ -117,151 +117,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+SYSTEM_PROMPT = """
 
-# Analysis prompt requesting only summary
-ANALYSIS_PROMPT = """You're an AI Incident Analyst. Analyze the image frames as a continuous sequence of 1-second frames of a video. Your output must contain ONLY the following two sections and NO other text.
+You are an AI Incident Analyst. Output ONLY these two sections - NO reasoning, NO extra text.
+
 Overview
-[3-5 sentence description of the incident, event, participants, and location.]
+[3-5 sentences summary to include incident category, what happened, participants, location, end status]
 
 Chronological Timeline of Actions
-00:00 - MM:SS: [Description of initial state]
-MM:SS - MM:SS: [Description of state change or action]
-`
----
-Rules for Analysis:
-1. Incident Categories: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Uncategorized.
-2. Efficiency: Group static scenes.
-3. Trigger: Only provide detailed descriptions for actual state changes.
-4. SILENCE: NEVER output your thought process.
+MM:SS - MM:SS: [Description]
+MM:SS - MM:SS: [Description]
+
+Timeline Description Guidelines:
+- Start: Initial scene state (vehicles, people, objects visible)
+- Changes: New actions, movement shifts, escalations, interactions
+- End: Final state or outcome of incident
+- Group static periods - only new entries for meaningful state changes
+
+Incident Categories: Traffic | Fire | Fighting | Unlawful Gathering | Uncategorized
+
+RULES:
+1. NEVER exceed maximum timestamp provided in user prompt
+2. NEVER output: "Let", "Okay", "Frame", "Wait", "Looking", "?"
+4. Start immediately with "Overview" - no preamble
+5. End timeline at or before maximum timestamp
 
 """
 
 
+# User prompt requesting only summary
+USER_PROMPT = """
+Analyze the provided image frames as a continuous video sequence at 1 frame per second.
 
-# Analysis prompt requesting only summary
-# ANALYSIS_PROMPT = """You’re an AI Incident Analyst. Analyze the image frames as a continuous sequence of 1-second frames of a video.  
-# Summarize in two parts: 
-# `
-# Overview: 
-# Start with “This is a [incidentType]...” — describe what happened, who/what was involved, location, and why it fits. Keep it 2–3 sentences.  
-# Chronological Timeline of Actions
-# 00:00 - MM:SS: [Description of initial state]
-# MM:SS - MM:SS: [Description of state change or action]
-# [Continue until end of video]`
-# """
+CRITICAL: Calculate the maximum timestamp from the frames provided. Do NOT exceed this timestamp in your timeline. The last entry must end at or before the final frame's time.
 
-# OLD_ANALYSIS_PROMPT = """
-# This is a completely independent analysis. Treat this as the first and only request.
-# You’re an AI Incident Analyst. Analyze the video as a continuous sequence of frames with 1 second intervals.  
+Output NOW - no reasoning:
 
-# Your task is to detect and describe:
-# Security-related incidents (e.g. fighting, theft, suspicious activity, unauthorized access)
-# Traffic incidents (e.g., collisions, reckless driving, pedestrian impacts, road obstructions)
-# Fire-related incidents (e.g., visible flames, smoke, explosions, fire spread)
-# Unlawful gathering incidents (e.g., unauthorized protests, riots, crowd disturbances)
+Overview
 
-# If the video does NOT clearly fit into any of the above categories, you MUST classify it as:
-# - Uncategorized
-
-# Summarize in two parts:  
-# 1. Overview: Start with “This is a [incidentType]...” — describe what happened, who/what was involved, location, and why it fits. Keep it 2–3 sentences.  
-# 2. Timeline: Use heading “Chronological Timeline of Actions” + entries like “MM:SS - MM:SS: [description]”, starting from the first frame 00:00 till the last frame MM:SS.    
-
-# Rules:
-# Skip Redundancy: Do NOT describe every frame. Group timestamps where the scene is static (e.g., "00:00 - 00:15: Vehicle traveling normally").
-# Action Focused: Only provide detailed descriptions when a state change occurs (e.g., the moment of collision or smoke appearing).
-# No Self-Correction: Do not output your internal reasoning or "re-evaluations." Provide only the final summary.
-# """
-
-# OLDANALYSIS_PROMPT = """
-
-# Summarize in two parts:  
-# 1. Overview: Start with “This is a [incidentType]...” — describe what happened, who/what was involved, location, and why it fits. Keep it 2–3 sentences.  
-# 2. Timeline: Use heading “Chronological Timeline of Actions” + entries like “MM:SS - MM:SS: [description]”, starting from the first frame 00:00 till the last frame MM:SS.  
-
-# Rules:
-# incidentType should be one of: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Unknown if it doesn't fit any category.
-# Skip Redundancy: Do NOT describe every frame. Group timestamps where the scene is static (e.g., "00:00 - 00:15: Vehicle traveling normally").
-# Action Focused: Only provide detailed descriptions when a state change occurs (e.g., the moment of collision or smoke appearing).
-# No Self-Correction: Do not output your internal reasoning or "re-evaluations." Provide only the final summary.
-# """
-
-# ANALYSIS_PROMPT = """
-# /no_think
-# Constraint: You will receive a number of image frames each 1 second apart. Chronological timeline actions should not exceed timestamp of the last image frame. Eg if last frame is 45, timeline should not go beyond 00:46.
-# Act as a precise video analysis engine. Your output must contain ONLY the following two sections and NO other text. Do not explain your reasoning.
-# `
-# Overview
-# [3-5 sentence description of the incident, event, participants, and location.]
-
-# Chronological Timeline of Actions
-# 00:00 - MM:SS: [Description of initial state]
-# MM:SS - MM:SS: [Description of state change or action]
-# [Continue until end of video]
-# `
-# ---
-# Rules for Analysis:
-# 1. Incident Categories: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Unknown.
-# 2. Efficiency: Group static scenes (e.g., "00:00 - 00:10: Scene remains static").
-# 3. Trigger: Only provide detailed descriptions for actual state changes.
-# 4. Silence: Do not output "Thinking," "Analysis," or "Wait."
-# Begin Summary:
-# """
-
-
-# ANALYSIS_PROMPT = """
-# /no_think
-# CRITICAL CONSTRAINT: You are NOT allowed to show ANY of your thinking, analysis, or reasoning process. 
-# Output ONLY the final formatted response. No "Wait", "Looking at", "Let me", "Actually", or similar phrases.
-
-# If you find yourself about to output reasoning, STOP and output the final answer directly.
-# Act as a precise video analysis engine. Your output must contain ONLY the following two sections and NO other text.
-# `
-# Overview
-# [3-5 sentence description of the incident, event, participants, and location.]
-
-# Chronological Timeline of Actions
-# 00:00 - MM:SS: [Description of initial state]
-# MM:SS - MM:SS: [Description of state change or action]
-# `
-# ---
-# Rules for Analysis:
-# 1. Incident Categories: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Uncategorized.
-# 2. Efficiency: Group static scenes.
-# 3. Trigger: Only provide detailed descriptions for actual state changes.
-# 4. SILENCE: NEVER output your thought process. EVER.
-
-# Begin Summary IMMEDIATELY:
-# """
-
-
-# ANALYSIS_PROMPT = """
-# <SYSTEM_INSTRUCTION>
-# You are an automated Incident Timeline Generator. Your task is to convert image sequences into a summary.
-# </SYSTEM_INSTRUCTION>
-
-# <CRITICAL_RULES>
-# 1.  **OUTPUT ONLY:** Do not output any thinking, reasoning, or "Wait" statements. Only output the final Timeline.
-# 2.  **NO FRAME LISTING:** Do not list individual frames. Group them by action (e.g., 00:00 - 00:05).
-# 3.  **NO RE-EVALUATION:** Once you write a timestamp, do not go back and change it. If you are unsure, estimate and move on.
-# 4.  **STOP IMMEDIATELY:** End the response after the last timestamp entry. Do not add "I hope this helps" or similar.
-# </CRITICAL_RULES>
-
-# <FEW_SHOT_EXAMPLE>
-# Input: 5 frames of a car driving straight.
-# Output:
-# 00:00 - 00:04: Traffic - Vehicle driving straight on highway.
-# </FEW_SHOT_EXAMPLE>
-
-# <OUTPUT_FORMAT>
-# Chronological Timeline of Actions
-# MM:SS - MM:SS: [Category] - [Concise Description]
-# </OUTPUT_FORMAT>
-
-# <USER_INPUT>
-# [INSERT IMAGE FRAMES HERE]
-# </USER_INPUT>
-# """
+"""
 
 def get_video_duration(video_path: str) -> int:
     """Get video duration in seconds using ffprobe"""
@@ -411,7 +305,7 @@ async def send_to_vlm(frames: list[str], media_uuid: str) -> str:
     """Send frames to VLM and get summary text response"""
     # Build content array with prompt and frames
     content = [
-        {"type": "text", "text": f"{ANALYSIS_PROMPT}\n\nAnalyzing {len(frames)} frames from video {media_uuid}:"}
+        {"type": "text", "text": f"{USER_PROMPT}\n\nAnalyzing {len(frames)} frames from video {media_uuid}:"}
     ]
     
     # Add each frame as base64 image
@@ -428,22 +322,7 @@ async def send_to_vlm(frames: list[str], media_uuid: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": """
-                    You are an automated Incident Timeline Generator.
-                    OUTPUT ONLY the final timeline. Do not output reasoning, thoughts, or "Wait" statements.
-                    If you start listing frames or re-evaluating, STOP and output the timeline only.
-                    End after the last timestamp entry. No extra text.
-                """
-                # "content": """
-                #     CRITICAL OPERATING RULES:
-
-                #     NO REASONING: Never output internal thoughts, "re-evaluations," or phrases like "Looking closely" or "Wait."
-                #     TEMPORAL RIGIDITY: You are strictly forbidden from generating timestamps beyond the provided "Temporal Boundary."
-                #     SCENE GROUPING: If a scene is static, group it (e.g., 00:00 - 00:10). Only detail state changes (collisions, fire, movement shifts).    
-                #     CATEGORIES: Use only: Security, Traffic, Fire, Fighting, Unlawful Gathering, or Unknown.
-                #     You will receive a number of image frames each 1 second apart. Chronological timeline actions should not exceed timestamp of the last image frame. Eg if last frame is 45, timeline should not go beyond 00:46.
-
-                # """
+                "content": SYSTEM_PROMPT
             },
             {
                 "role": "user",
@@ -517,7 +396,7 @@ async def send_to_llm_for_classification(summary: str) -> dict:
     classification_prompt = f"""You are an incident classifier. Analyze the following incident summary and extract structured information.
 
 Your analysis must include:
-- Incident classification (Security/Traffic/Fire/Fighting/Unlawful Gathering)
+- Incident classification (Traffic/Fire/Fighting/Unlawful Gathering)
 - Severity assessment (0-3, where 3 is most severe)
 - Deepfake detection and authenticity score (0.0-1.0)
 - Location identification (Singapore area if visible)
@@ -698,7 +577,7 @@ def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
             continue
         
         # Detect all entities (persons + vehicles)
-        results = YOLO_MODEL(frame, conf=0.25, classes=all_entity_classes, verbose=False)
+        results = YOLO_MODEL(frame, conf=0.5, classes=all_entity_classes, verbose=False)
         
         total_detections = 0
         conf_sum = 0.0
@@ -748,7 +627,7 @@ def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
     entity_count = 0
     
     # Detect and crop entities
-    results = YOLO_MODEL(frame, conf=0.25, classes=all_entity_classes, verbose=False)
+    results = YOLO_MODEL(frame, conf=0.5, classes=all_entity_classes, verbose=False)
     
     for result in results:
         boxes = result.boxes

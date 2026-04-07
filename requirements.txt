@@ -6,3 +6,4 @@ pydantic>=2.5.0
 yt-dlp>=2024.0.0
 ultralytics>=8.0.0
 opencv-python>=4.8.0
+openai>=1.0.0
