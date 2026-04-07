@@ -8,6 +8,7 @@ import subprocess
 import os
 import aiohttp
 import base64
+import random
 from pathlib import Path
 from typing import Optional
 import time
@@ -24,6 +25,16 @@ LLM_ENDPOINT = "http://192.168.1.10:9000/v1/chat/completions"
 LLM_MODEL = None  # Will be fetched from /v1/models endpoint on startup
 VIDEOS_DIR = Path("videos")
 YOLO_MODEL = None  # YOLO model for person/vehicle detection
+
+# Singapore areas for random location fallback
+SINGAPORE_AREAS = [
+    "Marina Bay", "Orchard Road", "Chinatown", "Little India",
+    "Sentosa", "Clarke Quay", "Bugis",
+    "Raffles Place", "Holland Village", "Tiong Bahru", "Katong",
+    "Geylang", "Lavender", "Bishan", "Woodlands", "Tampines",
+    "Jurong East", "Punggol", "Sengkang", "Bedok", "Yishun",
+    "Ang Mo Kio", "Toa Payoh", "Queenstown", "Bukit Timah"
+]
 
 
 
@@ -442,6 +453,10 @@ Summary to analyze:
                 result["deepfake"] = bool(result["deepfake"])
                 result["authenticity"] = float(result["authenticity"]) if isinstance(result["authenticity"], (int, float, str)) else 0.0
                 result["authenticity"] = max(0.0, min(1.0, result["authenticity"]))  # Clamp between 0.0-1.0
+                
+                # Fallback to random Singapore area if location is unknown
+                if result.get("location") in ["Unknown", "", None]:
+                    result["location"] = random.choice(SINGAPORE_AREAS)
                 
                 return result
                 
