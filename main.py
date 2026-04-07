@@ -13,6 +13,7 @@ from typing import Optional
 import time
 import cv2
 from ultralytics import YOLO
+from openai import AsyncOpenAI
 
 app = FastAPI()
 
@@ -23,6 +24,32 @@ LLM_ENDPOINT = "http://192.168.1.10:9000/v1/chat/completions"
 LLM_MODEL = None  # Will be fetched from /v1/models endpoint on startup
 VIDEOS_DIR = Path("videos")
 YOLO_MODEL = None  # YOLO model for person/vehicle detection
+
+
+
+SYSTEM_PROMPT = """
+You are an AI Incident Analyst. Output ONLY these two sections - NO reasoning, NO extra text.
+
+Overview
+[3-5 sentences summary to include incident category, what happened, participants, location, end status]
+
+Chronological Timeline of Actions
+MM:SS - MM:SS: [Description]
+MM:SS - MM:SS: [Description]
+
+Timeline Description Guidelines:
+- Start: Initial scene state (vehicles, people, objects visible)
+- Changes: New actions, movement shifts, escalations, interactions
+- End: Final state or outcome of incident
+- Group static periods - only new entries for meaningful state changes
+
+Incident Categories: Traffic | Fire | Fighting | Unlawful Gathering | Uncategorized
+
+RULES:
+- Describe only visible actions. Do not make assumptions or infer intent
+- Start immediately with "Overview" - no preamble
+- Base all timestamps on a relative zero-start (00:00) using the frame sequence count. Ignore any visible clock overlays, watermarks, or CCTV timestamps.
+"""
 
 
 async def get_vlm_model() -> Optional[str]:
@@ -117,45 +144,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SYSTEM_PROMPT = """
-
-You are an AI Incident Analyst. Output ONLY these two sections - NO reasoning, NO extra text.
-
-Overview
-[3-5 sentences summary to include incident category, what happened, participants, location, end status]
-
-Chronological Timeline of Actions
-MM:SS - MM:SS: [Description]
-MM:SS - MM:SS: [Description]
-
-Timeline Description Guidelines:
-- Start: Initial scene state (vehicles, people, objects visible)
-- Changes: New actions, movement shifts, escalations, interactions
-- End: Final state or outcome of incident
-- Group static periods - only new entries for meaningful state changes
-
-Incident Categories: Traffic | Fire | Fighting | Unlawful Gathering | Uncategorized
-
-RULES:
-1. NEVER exceed maximum timestamp provided in user prompt
-2. NEVER output: "Let", "Okay", "Frame", "Wait", "Looking", "?"
-4. Start immediately with "Overview" - no preamble
-5. End timeline at or before maximum timestamp
-
-"""
-
-
-# User prompt requesting only summary
-USER_PROMPT = """
-Analyze the provided image frames as a continuous video sequence at 1 frame per second.
-
-CRITICAL: Calculate the maximum timestamp from the frames provided. Do NOT exceed this timestamp in your timeline. The last entry must end at or before the final frame's time.
-
-Output NOW - no reasoning:
-
-Overview
-
-"""
 
 def get_video_duration(video_path: str) -> int:
     """Get video duration in seconds using ffprobe"""
@@ -273,6 +261,13 @@ def download_video_from_url(url: str, output_path: str) -> bool:
         return False
 
 
+def format_time(seconds: int) -> str:
+    """Convert seconds to 'Xmin:Ys' format"""
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes}min:{secs}s"
+
+
 def image_to_base64(image_path: str) -> str:
     """Convert image file to base64 data URL"""
     with open(image_path, 'rb') as f:
@@ -281,31 +276,28 @@ def image_to_base64(image_path: str) -> str:
     return f"data:image/jpeg;base64,{base64_str}"
 
 
-def strip_think_tags(text: str) -> str:
-    """
-    Strip internal reasoning content within <think> tags.
-    Returns everything after the closing </think> tag.
-    If the tag is missing, returns the original string.
-    Handles whitespace and case gracefully.
-    """
-    # Find the closing </think> tag (case-insensitive)
-    import re
-    pattern = re.compile(r'</think>', re.IGNORECASE)
-    match = pattern.search(text)
-    
-    if match:
-        # Return everything after the closing tag, stripped of leading/trailing whitespace
-        return text[match.end():].strip()
-    
-    # No think tags found, return original string
-    return text
-
-
 async def send_to_vlm(frames: list[str], media_uuid: str) -> str:
     """Send frames to VLM and get summary text response"""
+    # Initialize OpenAI client with custom endpoint
+    vlm_base_url = VLM_ENDPOINT.replace("/chat/completions", "")
+    client = AsyncOpenAI(base_url=vlm_base_url, api_key="dummy")
+    
+    # Calculate last timestamp (frames are 1-second intervals, starting at 0s)
+    num_frames = len(frames)
+    last_timestamp = num_frames - 1
+    time_str = format_time(last_timestamp)
+    
+    # Build dynamic prompt based on actual frame count
+    user_prompt = f"""Analyze these {num_frames} frames (1s intervals in chronological order). Video ends at {time_str}.
+
+Output NOW - no reasoning:
+
+Overview
+"""
+    
     # Build content array with prompt and frames
     content = [
-        {"type": "text", "text": f"{USER_PROMPT}\n\nAnalyzing {len(frames)} frames from video {media_uuid}:"}
+        {"type": "text", "text": f"{user_prompt}\n\n:"}
     ]
     
     # Add each frame as base64 image
@@ -316,78 +308,57 @@ async def send_to_vlm(frames: list[str], media_uuid: str) -> str:
             "image_url": {"url": base64_image}
         })
     
-    # Prepare request payload
-    payload = {
-        "model": VLM_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
+    try:
+        # Call VLM using OpenAI client
+        response = await client.chat.completions.create(
+            model=VLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ],
+            max_tokens=4096,
+            temperature=0.1,
+            stop=["<|endofthought|>", "<|im_start|>", "<|im_end|>", "Wait,", "Actually,", "Looking at", "Let me", "I need to", "Let's", "The frames", "Refining", "Draft"],
+            extra_body={
+                "chat_template_kwargs": {"enable_thinking": False}
             },
-            {
-                "role": "user",
-                "content": content
-            }
-        ],
-        "max_tokens": 8192,
-        # "use_thinking": False,
-        "extra_body":{
-          "chat_template_kwargs":{"enable_thinking":False}  
-        },
-        "temperature": 0.1,
-        "stop": ["<|endofthought|>", "<|im_start|>", "<|im_end|>", "Wait,", "Actually,", "Looking at", "Let me", "I need to", "Let's", "The frames", "Refining", "Draft"],
-        "repetition_penalty": 1.1
-    }
-    
-    # Send request to VLM
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(
-                VLM_ENDPOINT,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=300)
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise HTTPException(
-                        status_code=response.status,
-                        detail=f"VLM API error: {error_text}"
-                    )
-                
-                data = await response.json()
-                
-                # Extract content from response
-                if data.get("choices") and len(data["choices"]) > 0:
-                    reply = data["choices"][0]["message"]["content"]
-                    
-                    # Strip think tags first (handles VLM internal reasoning)
-                    reply = strip_think_tags(reply)
-                    
-                    # Clean the response - remove markdown code blocks if present
-                    if reply.startswith("```json"):
-                        reply = reply[7:]
-                    if reply.startswith("```"):
-                        reply = reply[3:]
-                    if reply.endswith("```"):
-                        reply = reply[:-3]
-                    reply = reply.strip()
-                    
-                    return reply
-                else:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="No response content from VLM"
-                    )
-                    
-        except aiohttp.ClientError as e:
-            print(f"\n{'='*50}")
-            print(f"VLM SERVICE UNAVAILABLE: {e}")
-            print(f"{'='*50}\n")
+            timeout=300
+        )
+        
+        # Extract content from response
+        if response.choices and len(response.choices) > 0:
+            reply = response.choices[0].message.content
+            
+            # Clean the response - remove markdown code blocks if present
+            if reply.startswith("```json"):
+                reply = reply[7:]
+            if reply.startswith("```"):
+                reply = reply[3:]
+            if reply.endswith("```"):
+                reply = reply[:-3]
+            reply = reply.strip()
+            
+            return reply
+        else:
             raise HTTPException(
-                status_code=503,
-                detail=f"VLM service unavailable: {str(e)}"
+                status_code=500,
+                detail="No response content from VLM"
             )
+            
+    except Exception as e:
+        print(f"\n{'='*50}")
+        print(f"VLM SERVICE UNAVAILABLE: {e}")
+        print(f"{'='*50}\n")
+        raise HTTPException(
+            status_code=503,
+            detail=f"VLM service unavailable: {str(e)}"
+        )
 
 
 async def send_to_llm_for_classification(summary: str) -> dict:
@@ -416,116 +387,79 @@ Required JSON output format (return ONLY this JSON, no other text):
 Summary to analyze:
 {summary}"""
     
-    # Prepare request payload
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant that returns only valid JSON, no other text."
-            },
-            {
-                "role": "user",
-                "content": classification_prompt
-            }
-        ],
-        "max_tokens": 1024,
-        "temperature": 0.1
-    }
+    # Initialize OpenAI client with custom endpoint
+    llm_base_url = LLM_ENDPOINT.replace("/chat/completions", "")
+    client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
     
-    # Send request to LLM
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(
-                LLM_ENDPOINT,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    print(f"LLM API error: {error_text}")
-                    # Return default values on error
-                    return {
-                        "summary": summary,
-                        "shortsummary": "Unable to classify",
-                        "incidentType": "Unknown",
-                        "severity": 0,
-                        "location": "Unknown",
-                        "deepfake": False,
-                        "authenticity": 0.0
-                    }
+    try:
+        # Call LLM using OpenAI client
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that returns only valid JSON, no other text."
+                },
+                {
+                    "role": "user",
+                    "content": classification_prompt
+                }
+            ],
+            max_tokens=1024,
+            temperature=0.1,
+            timeout=60
+        )
+        
+        # Extract content from response
+        if response.choices and len(response.choices) > 0:
+            reply = response.choices[0].message.content
+            
+            # Clean the response - remove markdown code blocks if present
+            if reply.startswith("```json"):
+                reply = reply[7:]
+            if reply.startswith("```"):
+                reply = reply[3:]
+            if reply.endswith("```"):
+                reply = reply[:-3]
+            reply = reply.strip()
+            
+            # Parse JSON response
+            try:
+                result = json.loads(reply)
                 
-                data = await response.json()
+                # Validate and ensure all required fields exist
+                result.setdefault("summary", summary)
+                result.setdefault("shortsummary", "Unable to classify")
+                result.setdefault("incidentType", "Unknown")
+                result.setdefault("severity", 0)
+                result.setdefault("location", "Unknown")
+                result.setdefault("deepfake", False)
+                result.setdefault("authenticity", 0.0)
                 
-                # Extract content from response
-                if data.get("choices") and len(data["choices"]) > 0:
-                    reply = data["choices"][0]["message"]["content"]
-                    
-                    # Strip think tags first (handles LLM internal reasoning)
-                    reply = strip_think_tags(reply)
-                    
-                    # Clean the response - remove markdown code blocks if present
-                    if reply.startswith("```json"):
-                        reply = reply[7:]
-                    if reply.startswith("```"):
-                        reply = reply[3:]
-                    if reply.endswith("```"):
-                        reply = reply[:-3]
-                    reply = reply.strip()
-                    
-                    # Parse JSON response
-                    try:
-                        result = json.loads(reply)
-                        
-                        # Validate and ensure all required fields exist
-                        result.setdefault("summary", summary)
-                        result.setdefault("shortsummary", "Unable to classify")
-                        result.setdefault("incidentType", "Unknown")
-                        result.setdefault("severity", 0)
-                        result.setdefault("location", "Unknown")
-                        result.setdefault("deepfake", False)
-                        result.setdefault("authenticity", 0.0)
-                        
-                        # Ensure types are correct
-                        result["severity"] = int(result["severity"]) if isinstance(result["severity"], (int, float, str)) else 0
-                        result["severity"] = max(0, min(3, result["severity"]))  # Clamp between 0-3
-                        result["deepfake"] = bool(result["deepfake"])
-                        result["authenticity"] = float(result["authenticity"]) if isinstance(result["authenticity"], (int, float, str)) else 0.0
-                        result["authenticity"] = max(0.0, min(1.0, result["authenticity"]))  # Clamp between 0.0-1.0
-                        
-                        return result
-                        
-                    except json.JSONDecodeError as e:
-                        print(f"Failed to parse LLM response as JSON: {e}")
-                        print(f"Raw response: {reply}")
-                        # Return default values on parse error
-                        return {
-                            "summary": summary,
-                            "shortsummary": "Unable to classify",
-                            "incidentType": "Unknown",
-                            "severity": 0,
-                            "location": "Unknown",
-                            "deepfake": False,
-                            "authenticity": 0.0
-                        }
-                else:
-                    print("No response content from LLM")
-                    # Return default values on error
-                    return {
-                        "summary": summary,
-                        "shortsummary": "Unable to classify",
-                        "incidentType": "Unknown",
-                        "severity": 0,
-                        "location": "Unknown",
-                        "deepfake": False,
-                        "authenticity": 0.0
-                    }
-                    
-        except aiohttp.ClientError as e:
-            print(f"\n{'='*50}")
-            print(f"LLM SERVICE UNAVAILABLE: {e}")
-            print(f"{'='*50}\n")
+                # Ensure types are correct
+                result["severity"] = int(result["severity"]) if isinstance(result["severity"], (int, float, str)) else 0
+                result["severity"] = max(0, min(3, result["severity"]))  # Clamp between 0-3
+                result["deepfake"] = bool(result["deepfake"])
+                result["authenticity"] = float(result["authenticity"]) if isinstance(result["authenticity"], (int, float, str)) else 0.0
+                result["authenticity"] = max(0.0, min(1.0, result["authenticity"]))  # Clamp between 0.0-1.0
+                
+                return result
+                
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse LLM response as JSON: {e}")
+                print(f"Raw response: {reply}")
+                # Return default values on parse error
+                return {
+                    "summary": summary,
+                    "shortsummary": "Unable to classify",
+                    "incidentType": "Unknown",
+                    "severity": 0,
+                    "location": "Unknown",
+                    "deepfake": False,
+                    "authenticity": 0.0
+                }
+        else:
+            print("No response content from LLM")
             # Return default values on error
             return {
                 "summary": summary,
@@ -536,6 +470,21 @@ Summary to analyze:
                 "deepfake": False,
                 "authenticity": 0.0
             }
+            
+    except Exception as e:
+        print(f"\n{'='*50}")
+        print(f"LLM SERVICE UNAVAILABLE: {e}")
+        print(f"{'='*50}\n")
+        # Return default values on error
+        return {
+            "summary": summary,
+            "shortsummary": "Unable to classify",
+            "incidentType": "Unknown",
+            "severity": 0,
+            "location": "Unknown",
+            "deepfake": False,
+            "authenticity": 0.0
+        }
 
 
 def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
