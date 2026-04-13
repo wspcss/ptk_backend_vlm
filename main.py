@@ -42,24 +42,30 @@ SYSTEM_PROMPT = """
 You are an AI Incident Analyst. Output ONLY these two sections - NO reasoning, NO extra text.
 
 Overview
-[3-5 sentences summary to include incident category, what happened, participants, location, end status]
+[5-8 sentences summary should include incident category, what happened, participants, location, end status]
 
 Chronological Timeline of Actions
+00:00 - MM:SS: [Description]
 MM:SS - MM:SS: [Description]
 MM:SS - MM:SS: [Description]
+
 
 Timeline Description Guidelines:
 - Start: Initial scene state (vehicles, people, objects visible)
 - Changes: New actions, movement shifts, escalations, interactions
 - End: Final state or outcome of incident
 - Group static periods - only new entries for meaningful state changes
+- The final entry MUST end at the exact video duration provided in the user prompt.
 
 Incident Categories: Traffic | Fire | Fighting | Unlawful Gathering | Uncategorized
 
 RULES:
-- Describe only visible actions. Do not make assumptions or infer intent
-- Start immediately with "Overview" - no preamble
-- Base all timestamps on a relative zero-start (00:00) using the frame sequence count. Ignore any visible clock overlays, watermarks, or CCTV timestamps.
+- NO PREAMBLE. Start immediately with "Overview".
+- ZERO-BASE: Use a relative zero-start (00:00). Strictly ignore all on-screen CCTV/clock timestamps.
+- NO ASSUMPTIONS: Describe only visible actions. Do not infer intent or events beyond the frames provided.
+- NO newline between Timeline of Actions entry.
+- Include in the overview section any road names or landmarks in singapore. If unable to identify, do not include
+- Video may contain replay of the same event. State in your timeline if you see replay and describe the actions in the replay as well. The timeline should be strictly chronological, so if you see a replay of an event at 00:30 that originally happened at 00:10, you should include it in the timeline at 00:30 with a note that it is a replay of the event that happened at 00:10.
 """
 
 
@@ -299,12 +305,13 @@ async def send_to_vlm(frames: list[str], media_uuid: str) -> str:
     time_str = format_time(last_timestamp)
     
     # Build dynamic prompt based on actual frame count
-    user_prompt = f"""Analyze these {num_frames} frames (1s intervals in chronological order). Video ends at {time_str}.
-
-Output NOW - no reasoning:
-
-Overview
-"""
+    user_prompt = f"""
+    Analyze these {num_frames} frames (1s intervals). 
+    **Constraint:** The video duration is exactly {last_timestamp} seconds. The timeline must start at 00:00 and conclude exactly at {time_str}.
+    Video Chronological Timeline of Actions should not exceed {time_str}.
+    Output NOW - no reasoning:
+    Overview
+    """
     
     # Build content array with prompt and frames
     content = [
@@ -319,6 +326,12 @@ Overview
             "image_url": {"url": base64_image}
         })
     
+    print(f"\n{'='*50}")
+    print(f"SYSTEM_PROMPT:\n{SYSTEM_PROMPT}")
+    print(f"\n{'='*50}")
+    print(f"USER_PROMPT:\n{user_prompt}")
+    print(f"{'='*50}\n")
+
     try:
         # Call VLM using OpenAI client
         response = await client.chat.completions.create(
@@ -561,7 +574,7 @@ def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
             'avg_confidence': avg_confidence
         })
         
-        print(f"  [Frame {i+1}/{len(frames)}] {os.path.basename(frame_path)}: {total_detections} detections (conf: {avg_confidence:.3f})")
+        # print(f"  [Frame {i+1}/{len(frames)}] {os.path.basename(frame_path)}: {total_detections} detections (conf: {avg_confidence:.3f})")
     
     if not frame_data:
         print("No valid frames found for detection")
@@ -665,6 +678,9 @@ async def upload_data(post_file: UploadFile = File(...)):
         extract_frames(str(video_path), video_name, str(frames_dir))
         extract_time = time.time() - extract_start
         
+        # Get video duration
+        duration = get_video_duration(str(video_path))
+        
         total_time = time.time() - total_start
         
         # Print timing information
@@ -673,6 +689,7 @@ async def upload_data(post_file: UploadFile = File(...)):
         print(f"  Total time: {total_time:.2f} seconds")
         print(f"  - Save video: {save_time:.2f} seconds")
         print(f"  - Extract frames: {extract_time:.2f} seconds")
+        print(f"  - Video duration: {duration} seconds")
         print(f"{'='*50}\n")
         
         # Return success response
@@ -685,6 +702,7 @@ async def upload_data(post_file: UploadFile = File(...)):
                 "content_type": post_file.content_type,
                 "size": len(content),
                 "media_uuid": media_uuid,
+                "duration": duration,
                 "deepfake": False
             }
         )
@@ -756,6 +774,9 @@ async def upload_url(url: str):
         extract_frames(str(video_path), video_name, str(frames_dir))
         extract_time = time.time() - extract_start
         
+        # Get video duration
+        duration = get_video_duration(str(video_path))
+        
         total_time = time.time() - total_start
         
         # Print timing information
@@ -765,6 +786,7 @@ async def upload_url(url: str):
         print(f"  - Download video: {download_time:.2f} seconds")
         print(f"  - Save video: {save_time:.2f} seconds")
         print(f"  - Extract frames: {extract_time:.2f} seconds")
+        print(f"  - Video duration: {duration} seconds")
         print(f"{'='*50}\n")
         
         # Return success response with media_uuid
@@ -775,6 +797,7 @@ async def upload_url(url: str):
                 "message": "URL processed successfully",
                 "url": url,
                 "media_uuid": media_uuid,
+                "duration": duration,
                 "deepfake": False
             }
         )
