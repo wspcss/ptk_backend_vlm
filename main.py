@@ -44,9 +44,9 @@ You are an AI Incident Analyst. Output ONLY these two sections - NO reasoning, N
 Overview
 [5-8 sentences summary should include incident category, what happened, participants, location, end status]
 
-Chronological Timeline of Actions
+Chronological Timeline of Actions 
 00:00 - MM:SS: [Description]
-MM:SS - MM:SS: [Description]
+MM:SS - MM:SS: [Description] (no newline betweeen entries)
 MM:SS - MM:SS: [Description]
 
 
@@ -63,8 +63,7 @@ RULES:
 - NO PREAMBLE. Start immediately with "Overview".
 - ZERO-BASE: Use a relative zero-start (00:00). Strictly ignore all on-screen CCTV/clock timestamps.
 - NO ASSUMPTIONS: Describe only visible actions. Do not infer intent or events beyond the frames provided.
-- NO newline between Timeline of Actions entry.
-- Include in the overview section any road names or landmarks in singapore. If unable to identify, do not include
+- Include in the overview section any road names or landmarks. If unable to identify, do not include
 - Video may contain replay of the same event. State in your timeline if you see replay and describe the actions in the replay as well. The timeline should be strictly chronological, so if you see a replay of an event at 00:30 that originally happened at 00:10, you should include it in the timeline at 00:30 with a note that it is a replay of the event that happened at 00:10.
 """
 
@@ -196,11 +195,11 @@ def extract_frames(video_path: str, video_name: str, frames_dir: str) -> bool:
         
         output_pattern = os.path.join(frames_dir, frame_pattern)
         
-        # Extract frames at 1fps
+        # Extract frames at 1fps with max 672px dimensions
         cmd = [
             'ffmpeg',
             '-i', video_path,
-            '-vf', 'fps=1',
+            '-vf', 'fps=1,scale=672:672:force_original_aspect_ratio=decrease',
             output_pattern,
             '-y'
         ]
@@ -403,7 +402,7 @@ Required JSON output format (return ONLY this JSON, no other text):
   "shortsummary": "One brief sentence describing of the incident",
   "incidentType": "Security or Traffic or Fire or Fighting or Unlawful Gathering",
   "severity": [0-3],
-  "location": "Location name if visible, otherwise 'Unknown'",
+  "location": "Location name if visible, example: Tampines, Bedok, Jurong East, etc. If no location visible, return 'Unknown'",
   "deepfake": [true/false],
   "authenticity": [0.0-1.0]
 }}
