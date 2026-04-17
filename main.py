@@ -19,9 +19,9 @@ from openai import AsyncOpenAI
 app = FastAPI()
 
 # Configuration
-VLM_ENDPOINT = "http://192.168.1.10:8000/v1/chat/completions"
+VLM_ENDPOINT = "http://localhost:8000/v1/chat/completions"
 VLM_MODEL = None  # Will be fetched from /v1/models endpoint on startup
-LLM_ENDPOINT = "http://192.168.1.10:9000/v1/chat/completions"
+LLM_ENDPOINT = "http://localhost:9000/v1/chat/completions"
 LLM_MODEL = None  # Will be fetched from /v1/models endpoint on startup
 VIDEOS_DIR = Path("videos")
 YOLO_MODEL = None  # YOLO model for person/vehicle detection
