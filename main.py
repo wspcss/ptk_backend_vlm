@@ -553,7 +553,7 @@ def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
             continue
         
         # Detect all entities (persons + vehicles)
-        results = YOLO_MODEL(frame, conf=0.5, classes=all_entity_classes, verbose=False)
+        results = YOLO_MODEL(frame, conf=0.3, classes=all_entity_classes, verbose=False)
         
         total_detections = 0
         conf_sum = 0.0
@@ -603,7 +603,7 @@ def detect_and_extract_entities(frames: list[str], entities_dir: str) -> int:
     entity_count = 0
     
     # Detect and crop entities
-    results = YOLO_MODEL(frame, conf=0.5, classes=all_entity_classes, verbose=False)
+    results = YOLO_MODEL(frame, conf=0.3, classes=all_entity_classes, verbose=False)
     
     for result in results:
         boxes = result.boxes
